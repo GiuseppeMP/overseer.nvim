@@ -18,136 +18,138 @@ local ToggleTermStrategy = {}
 ---    on_create nil|fun(term: table) function to execute on terminal creation
 ---@return overseer.Strategy
 function ToggleTermStrategy.new(opts)
-  opts = vim.tbl_extend("keep", opts or {}, {
-    use_shell = false,
-    direction = nil,
-    highlights = nil,
-    auto_scroll = nil,
-    close_on_exit = false,
-    open_on_start = true,
-    hidden = false,
-    on_create = nil,
-  })
-  if opts.dir then
-    vim.notify_once(
-      "Overseer toggleterm option 'dir' is deprecated. Use the task cwd option instead.\nThis option will be removed on 2023-04-01",
-      vim.log.levels.WARN
-    )
-  end
-  return setmetatable({
-    bufnr = nil,
-    chan_id = nil,
-    opts = opts,
-  }, { __index = ToggleTermStrategy })
+    opts = vim.tbl_extend("keep", opts or {}, {
+        use_shell = false,
+        direction = nil,
+        highlights = nil,
+        auto_scroll = nil,
+        close_on_exit = false,
+        open_on_start = true,
+        hidden = false,
+        on_create = nil,
+    })
+    if opts.dir then
+        vim.notify_once(
+            "Overseer toggleterm option 'dir' is deprecated. Use the task cwd option instead.\nThis option will be removed on 2023-04-01",
+            vim.log.levels.WARN
+        )
+    end
+    return setmetatable({
+        bufnr = nil,
+        chan_id = nil,
+        opts = opts,
+    }, { __index = ToggleTermStrategy })
 end
 
 function ToggleTermStrategy:reset()
-  util.soft_delete_buf(self.bufnr)
-  self.bufnr = nil
-  if self.chan_id then
-    vim.fn.jobstop(self.chan_id)
-    self.chan_id = nil
-  end
+    util.soft_delete_buf(self.bufnr)
+    self.bufnr = nil
+    if self.chan_id then
+        vim.fn.jobstop(self.chan_id)
+        self.chan_id = nil
+    end
 end
 
 function ToggleTermStrategy:get_bufnr()
-  return self.bufnr
+    return self.bufnr
 end
 
 ---@param task overseer.Task
 function ToggleTermStrategy:start(task)
-  local chan_id
-  local mode = vim.api.nvim_get_mode().mode
-  local stdout_iter = util.get_stdout_line_iter()
+    local chan_id
+    local mode = vim.api.nvim_get_mode().mode
+    local stdout_iter = util.get_stdout_line_iter()
 
-  local function on_stdout(data)
-    task:dispatch("on_output", data)
-    local lines = stdout_iter(data)
-    if not vim.tbl_isempty(lines) then
-      task:dispatch("on_output_lines", lines)
+    local function on_stdout(data)
+        task:dispatch("on_output", data)
+        local lines = stdout_iter(data)
+        if not vim.tbl_isempty(lines) then
+            task:dispatch("on_output_lines", lines)
+        end
     end
-  end
 
-  local cmd = task.cmd
-  if type(cmd) == "table" then
-    cmd = shell.escape_cmd(cmd, "strong")
-  end
+    local cmd = task.cmd
+    if type(cmd) == "table" then
+        cmd = shell.escape_cmd(cmd, "strong")
+    end
 
-  local passed_cmd
-  if not self.opts.use_shell then
-    passed_cmd = cmd
-  end
+    local passed_cmd
+    if not self.opts.use_shell then
+        passed_cmd = cmd
+    end
 
-  local term = terminal.Terminal:new({
-    cmd = passed_cmd,
-    env = task.env,
-    highlights = self.opts.highlights,
-    dir = self.opts.dir or task.cwd,
-    direction = self.opts.direction,
-    auto_scroll = self.opts.auto_scroll,
-    close_on_exit = self.opts.close_on_exit,
-    hidden = self.opts.hidden,
-    on_create = function(t)
-      if self.opts.on_create then
-        self.opts.on_create(t)
-      end
+    local term = terminal.Terminal:new({
+        cmd = passed_cmd,
+        env = task.env,
+        highlights = self.opts.highlights,
+        dir = vim.fn.getcwd(),
+        direction = self.opts.direction,
+        auto_scroll = self.opts.auto_scroll,
+        close_on_exit = self.opts.close_on_exit,
+        hidden = self.opts.hidden,
+        on_create = function(t)
+            if self.opts.on_create then
+                self.opts.on_create(t)
+            end
 
-      if self.opts.use_shell then
-        t:send(cmd)
-        t:send("exit $?")
-      end
-    end,
-    on_stdout = function(_job, job_id, d)
-      if self.chan_id ~= job_id then
-        return
-      end
-      on_stdout(d)
-    end,
-    on_exit = function(_, j, c)
-      jobs.unregister(j)
-      if self.chan_id ~= j then
-        return
-      end
-      -- Feed one last line end to flush the output
-      on_stdout({ "" })
-      self.chan_id = nil
-      if vim.v.exiting == vim.NIL then
-        task:on_exit(c)
-      end
-    end,
-  })
+            if self.opts.use_shell then
+                t:send(cmd)
+                if self.opts.close_on_exit then
+                    t:send("exit $?")
+                end
+            end
+        end,
+        on_stdout = function(_, job_id, d)
+            if self.chan_id ~= job_id then
+                return
+            end
+            on_stdout(d)
+        end,
+        on_exit = function(_, j, c)
+            jobs.unregister(j)
+            if self.chan_id ~= j then
+                return
+            end
+            -- Feed one last line end to flush the output
+            on_stdout({ "" })
+            self.chan_id = nil
+            if vim.v.exiting == vim.NIL then
+                task:on_exit(c)
+            end
+        end,
+    })
 
-  if self.opts.open_on_start then
-    term:toggle()
-  else
-    term:spawn()
-  end
+    if self.opts.open_on_start then
+        term:toggle()
+    else
+        term:spawn()
+    end
 
-  chan_id = term.job_id
-  self.bufnr = term.bufnr
+    chan_id = term.job_id
+    self.bufnr = term.bufnr
 
-  util.hack_around_termopen_autocmd(mode)
+    util.hack_around_termopen_autocmd(mode)
 
-  if chan_id == 0 then
-    error(string.format("Invalid arguments for task '%s'", task.name))
-  elseif chan_id == -1 then
-    error(string.format("Command '%s' not executable", vim.inspect(task.cmd)))
-  else
-    jobs.register(chan_id)
-    self.chan_id = chan_id
-  end
+    if chan_id == 0 then
+        error(string.format("Invalid arguments for task '%s'", task.name))
+    elseif chan_id == -1 then
+        error(string.format("Command '%s' not executable", vim.inspect(task.cmd)))
+    else
+        jobs.register(chan_id)
+        self.chan_id = chan_id
+    end
 end
 
 function ToggleTermStrategy:stop()
-  if self.chan_id then
-    vim.fn.jobstop(self.chan_id)
-    self.chan_id = nil
-  end
+    if self.chan_id then
+        vim.fn.jobstop(self.chan_id)
+        self.chan_id = nil
+    end
 end
 
 function ToggleTermStrategy:dispose()
-  self:stop()
-  util.soft_delete_buf(self.bufnr)
+    self:stop()
+    util.soft_delete_buf(self.bufnr)
 end
 
 return ToggleTermStrategy
